@@ -6,33 +6,81 @@ import jsPDF from "jspdf";
 
 /** Allowed ranges (saisie guidée) */
 const RANGES = {
-  period:   { min: 0.05, max: 2000, label: "Orbital Period (days)" },           // très court -> très long
-  duration: { min: 0.2,  max: 40,   label: "Transit Duration (hours)" },        // typiquement ~0.5–20 h
-  depth:    { min: 0.00001, max: 0.1, label: "Transit Depth (fraction)" },      // 10 ppm à 10% (fraction)
-  radius:   { min: 0.2,  max: 30,   label: "Planet Radius (R⊕)" },              // 0.2–30 R⊕
-  snr:      { min: 0,    max: 100,  label: "Signal-to-Noise Ratio (SNR)" },     // 0–100 (MES/SNR)
-  rstar:    { min: 0.05, max: 20,   label: "Stellar Radius (R☉)" },             // 0.05–20 R☉
+  period:   { min: 0.05, max: 2000, label: "Orbital Period (days)" },      // très court -> très long
+  duration: { min: 0.2,  max: 40,   label: "Transit Duration (hours)" },   // typiquement ~0.5–20 h
+  depth:    { min: 0.00001, max: 0.1, label: "Transit Depth (fraction)" }, // 10 ppm à 10% (fraction)
+  radius:   { min: 0.2,  max: 30,   label: "Planet Radius (R⊕)" },         // 0.2–30 R⊕
+  snr:      { min: 0,    max: 100,  label: "Signal-to-Noise Ratio (SNR)"}, // 0–100 (MES/SNR)
+  rstar:    { min: 0.05, max: 20,   label: "Stellar Radius (R☉)" },        // 0.05–20 R☉
 };
 
+/* Small, accessible info tooltip shown next to labels */
+function InfoHint({ text }) {
+  return (
+    <span className="group relative inline-flex items-center ml-2 align-middle">
+      <button type="button" className="outline-none" aria-label="More info">
+        <Info className="w-4 h-4 text-purple-300/80 group-hover:text-purple-200 transition-colors cursor-help" />
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-5 top-1 z-10 w-64 rounded-md border border-white/10 bg-[rgba(10,10,22,.95)] px-3 py-2 text-xs leading-relaxed text-gray-200 shadow-xl opacity-0 translate-y-1
+                   group-hover:opacity-100 group-hover:translate-y-0
+                   group-focus-within:opacity-100 group-focus-within:translate-y-0
+                   transition-all"
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+/* Reusable numeric field with range helper */
+function NumberField({ label, hint, placeholder, value, onChange, range }) {
+  const invalid =
+    value !== "" &&
+    (Number.isNaN(Number(value)) ||
+      Number(value) < range.min ||
+      Number(value) > range.max);
+
+  return (
+    <div className="mb-4">
+      <label className="text-sm text-gray-300 block mb-2">
+        <span className="align-middle">{label}</span>
+        {hint && <InfoHint text={hint} />}
+      </label>
+      <input
+        type="number"
+        step="any"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`w-full bg-white/10 text-white rounded-lg px-4 py-2 border ${
+          invalid ? "border-red-400" : "border-purple-500/30"
+        } placeholder:text-gray-400`}
+      />
+      <div className={`text-xs mt-1 ${invalid ? "text-red-300" : "text-gray-500"}`}>
+        Allowed range: {range.min} – {range.max}
+      </div>
+    </div>
+  );
+}
+
 export default function Classification({ modelReady = true }) {
-  // Inputs (6 champs demandés)
-  const [period, setPeriod]       = useState("");
-  const [duration, setDuration]   = useState("");
-  const [depth, setDepth]         = useState("");
-  const [radius, setRadius]       = useState("");
-  const [snr, setSnr]             = useState("");
-  const [rstar, setRstar]         = useState("");
+  // Inputs
+  const [period, setPeriod]     = useState("");
+  const [duration, setDuration] = useState("");
+  const [depth, setDepth]       = useState("");
+  const [radius, setRadius]     = useState("");
+  const [snr, setSnr]           = useState("");
+  const [rstar, setRstar]       = useState("");
 
-  // Result
+  // Result + export state
   const [result, setResult] = useState(null);
-
-  // Export status toast
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState(null); // {type:'ok'|'err', msg:string}
+  const resultRef = useRef(null);
 
-  const resultRef = useRef(null); // capture zone (panneau de droite)
-
-  // Validation des 6 champs
+  // Validation
   const valuesValid = useMemo(() => {
     const checks = [
       check(period, RANGES.period),
@@ -52,42 +100,33 @@ export default function Classification({ modelReady = true }) {
     return n >= min && n <= max;
   }
 
-  /* -------------------- Prédiction qui varie avec les entrées -------------------- */
+  /* ---------------- Prediction that varies with inputs ---------------- */
   function predictFromInputs(inp) {
-    const P   = Number(inp.period);           // jours
-    const Dur = Number(inp.duration);         // heures
-    const D   = Number(inp.depth);            // fraction
-    const R   = Number(inp.radius);           // R⊕
+    const P   = Number(inp.period);     // days
+    const Dur = Number(inp.duration);   // hours
+    const D   = Number(inp.depth);      // fraction
+    const R   = Number(inp.radius);     // R_earth
     const SNR = Number(inp.snr);
-    const RS  = Number(inp.rstar);            // R☉
+    const RS  = Number(inp.rstar);      // R_sun
 
-    // Helpers
     const clamp01 = (x) => Math.max(0, Math.min(1, x));
-    const norm = (x, min, max) => clamp01((x - min) / (max - min));
-    const near = (x, c, w) => clamp01(1 - Math.abs(x - c) / w); // 1 si proche de c
-    const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+    const near = (x, c, w) => clamp01(1 - Math.abs(x - c) / w);
+    const durationDays = Dur / 24;
+    const duty = P > 0 ? durationDays / P : 0;
+    const dutyGood = near(duty, 0.03, 0.03);
 
-    // Conversions / proxys
-    const durationDays = Dur / 24;                   // h -> jours
-    const duty = P > 0 ? durationDays / P : 0;       // duty cycle ~ fraction de la période occupée par le transit
-    const dutyGood = near(duty, 0.03, 0.03);         // ~3% (très large fenêtre 0–6%)
-
-    // Géométrie simple : profondeur attendue ~ (Rp/R*)^2
-    const R_earth_to_sun = 0.0091577;                // 1 R⊕ en R☉
+    const R_earth_to_sun = 0.0091577;
     const Rp_over_Rs = (R * R_earth_to_sun) / Math.max(RS, 0.05);
-    const depthExpected = clamp01(Rp_over_Rs * Rp_over_Rs); // fraction attendue (bornée 0..1)
+    const depthExpected = clamp01(Rp_over_Rs * Rp_over_Rs);
     const depthConsistency = near(D, depthExpected, Math.max(0.001, depthExpected * 0.6));
 
-    // Proxys « intensité du signal »
-    const depthStrength = clamp01(D / 0.02);         // 2% ~= 1.0
-    const snrNorm = clamp01(SNR / 50);               // SNR ~50 => 1.0
+    const depthStrength = clamp01(D / 0.02);
+    const snrNorm = clamp01(SNR / 50);
 
-    // Périodes étranges (favorisent faux-positifs / candidats)
     const ultraShort = P < 0.5 ? 1 : 0;
     const ultraLong  = P > 500 ? 1 : 0;
     const moderatePeriod = P > 0.8 && P < 120 ? 1 : 0;
 
-    // Scores (logits) par classe
     const zConfirmed =
       1.1 * depthConsistency +
       0.9 * snrNorm +
@@ -106,8 +145,8 @@ export default function Classification({ modelReady = true }) {
 
     const zCandidate =
       0.35 +
-      0.45 * near(depthStrength, 0.4, 0.25) + // profondeur ni trop faible ni trop forte
-      0.35 * near(snrNorm, 0.35, 0.25) +      // SNR moyen -> ambigu
+      0.45 * near(depthStrength, 0.4, 0.25) +
+      0.35 * near(snrNorm, 0.35, 0.25) +
       0.25 * (dutyGood < 0.35 ? 1 : 0);
 
     const probs = softmax({
@@ -116,14 +155,10 @@ export default function Classification({ modelReady = true }) {
       Candidate:          zCandidate,
     });
 
-    // Pick label
     let label = "Confirmed Planet";
     let best = -1;
     Object.entries(probs).forEach(([k, v]) => {
-      if (v > best) {
-        best = v;
-        label = k;
-      }
+      if (v > best) { best = v; label = k; }
     });
 
     const explanation = buildExplanation(
@@ -174,18 +209,12 @@ export default function Classification({ modelReady = true }) {
   function classify() {
     if (!modelReady) {
       setResult(null);
-      setExportStatus({
-        type: "err",
-        msg: "Please train the model first (Training tab).",
-      });
+      setExportStatus({ type: "err", msg: "Please train the model first (Training tab)." });
       return;
     }
     if (!valuesValid) {
       setResult(null);
-      setExportStatus({
-        type: "err",
-        msg: "Please enter valid values within the allowed ranges.",
-      });
+      setExportStatus({ type: "err", msg: "Please enter valid values within the allowed ranges." });
       return;
     }
 
@@ -284,6 +313,7 @@ export default function Classification({ modelReady = true }) {
     }
   }
 
+  /* ------------------------------ RENDER ------------------------------ */
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* LEFT: form */}
@@ -305,13 +335,55 @@ export default function Classification({ modelReady = true }) {
           </div>
         )}
 
-        {/* Les 6 champs */}
-        <NumberField label={RANGES.period.label}   placeholder="e.g., 12.4"  value={period}   onChange={setPeriod}   range={RANGES.period} />
-        <NumberField label={RANGES.duration.label} placeholder="e.g., 3.5"   value={duration} onChange={setDuration} range={RANGES.duration} />
-        <NumberField label={RANGES.depth.label}    placeholder="e.g., 0.008" value={depth}    onChange={setDepth}    range={RANGES.depth} />
-        <NumberField label={RANGES.radius.label}   placeholder="e.g., 2.5"   value={radius}   onChange={setRadius}   range={RANGES.radius} />
-        <NumberField label={RANGES.snr.label}      placeholder="e.g., 18"    value={snr}      onChange={setSnr}      range={RANGES.snr} />
-        <NumberField label={RANGES.rstar.label}    placeholder="e.g., 0.9"   value={rstar}    onChange={setRstar}    range={RANGES.rstar} />
+        {/* The 6 inputs with info hints */}
+        <NumberField
+          label={RANGES.period.label}
+          hint="Time the planet takes to complete one orbit around its star (in days)."
+          placeholder="e.g., 12.4"
+          value={period}
+          onChange={setPeriod}
+          range={RANGES.period}
+        />
+        <NumberField
+          label={RANGES.duration.label}
+          hint="Total time the star appears dimmed during a single transit (in hours)."
+          placeholder="e.g., 3.5"
+          value={duration}
+          onChange={setDuration}
+          range={RANGES.duration}
+        />
+        <NumberField
+          label={RANGES.depth.label}
+          hint="Fractional dimming of the star’s light during transit (e.g., 0.01 = 1%)."
+          placeholder="e.g., 0.008"
+          value={depth}
+          onChange={setDepth}
+          range={RANGES.depth}
+        />
+        <NumberField
+          label={RANGES.radius.label}
+          hint="Estimated planetary radius relative to Earth’s radius (R⊕)."
+          placeholder="e.g., 2.5"
+          value={radius}
+          onChange={setRadius}
+          range={RANGES.radius}
+        />
+        <NumberField
+          label={RANGES.snr.label}
+          hint="Signal-to-Noise Ratio (higher = clearer detection)."
+          placeholder="e.g., 18"
+          value={snr}
+          onChange={setSnr}
+          range={RANGES.snr}
+        />
+        <NumberField
+          label={RANGES.rstar.label}
+          hint="Host star’s radius in solar radii (R☉)."
+          placeholder="e.g., 0.9"
+          value={rstar}
+          onChange={setRstar}
+          range={RANGES.rstar}
+        />
 
         <div className="pt-2 flex gap-3">
           <button
@@ -345,7 +417,7 @@ export default function Classification({ modelReady = true }) {
           </div>
         ) : (
           <div className="flex-1 flex flex-col">
-            {/* bloc prédiction */}
+            {/* prediction */}
             <div className="bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 rounded-lg p-6 text-center">
               <p className="text-sm text-gray-400 mb-2">Prediction</p>
               <p className="text-3xl font-bold text-white mb-1">{result.prediction}</p>
@@ -354,7 +426,7 @@ export default function Classification({ modelReady = true }) {
               </p>
             </div>
 
-            {/* Probabilités */}
+            {/* probabilities */}
             <div className="bg-purple-500/10 rounded-lg p-4 mt-4">
               <p className="text-sm font-medium text-white mb-3">Class Probabilities</p>
               {Object.entries(result.probabilities).map(([cls, prob]) => (
@@ -373,21 +445,19 @@ export default function Classification({ modelReady = true }) {
               ))}
             </div>
 
-            {/* Explication */}
+            {/* explanation */}
             <div className="mt-4 bg-white/5 border border-white/10 rounded-lg p-4">
               <div className="flex items-start gap-2">
                 <Info className="w-5 h-5 text-purple-300 mt-0.5" />
-                <div>
-                  <p className="text-sm text-gray-300 whitespace-pre-line">
-                    {result.explanation}
-                  </p>
-                </div>
+                <p className="text-sm text-gray-300 whitespace-pre-line">
+                  {result.explanation}
+                </p>
               </div>
             </div>
           </div>
         )}
 
-        {/* Footer actions + toasts */}
+        {/* footer actions + toasts */}
         <div className="mt-4 flex items-center gap-3">
           <button
             onClick={handleExportPDF}
@@ -410,34 +480,6 @@ export default function Classification({ modelReady = true }) {
             {exportStatus.msg}
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-/* ---------- Small input component ---------- */
-function NumberField({ label, placeholder, value, onChange, range }) {
-  const invalid =
-    value !== "" &&
-    (Number.isNaN(Number(value)) ||
-      Number(value) < range.min ||
-      Number(value) > range.max);
-
-  return (
-    <div className="mb-4">
-      <label className="text-sm text-gray-400 block mb-2">{label}</label>
-      <input
-        type="number"
-        step="any"
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={`w-full bg-white/10 text-white rounded-lg px-4 py-2 border ${
-          invalid ? "border-red-400" : "border-purple-500/30"
-        } placeholder:text-gray-400`}
-      />
-      <div className={`text-xs mt-1 ${invalid ? "text-red-300" : "text-gray-500"}`}>
-        Allowed range: {range.min} – {range.max}
       </div>
     </div>
   );
